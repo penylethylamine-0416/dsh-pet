@@ -9,7 +9,7 @@
  * knowledge.
  */
 
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -77,6 +77,12 @@ export interface PetSettingsCardFace extends CardActions {
     /** Card snapshot bound by the renderer as usePetSettingsCard. */
     petSettingsCard: SnapshotStore<PetSettingsCardState>
   }
+  /**
+   * Ask the card for the pet registry again. The pet API only exists while the
+   * plugin is enabled, so opening the master switch has to be able to re-ask
+   * instead of leaving the picker empty until the page reloads.
+   */
+  refreshPets(): void
 }
 
 /**
@@ -101,7 +107,9 @@ type PetChoice = PetPreviewDefinition
 
 /** Fetch the registry list (the same data the sprite renders from). */
 async function fetchPetChoices(): Promise<PetChoice[]> {
-  const response = await fetch('/api/pet/pets')
+  // Never from cache: the list is exactly what changes when the plugin is
+  // switched on (the API only exists then) or a pet is installed.
+  const response = await fetch('/api/pet/pets', { cache: 'no-store' })
   if (!response.ok) throw new Error('pet pets failed: ' + response.status)
   return (await response.json()) as PetChoice[]
 }
@@ -143,6 +151,8 @@ export class PetSettingsCardController {
   private fallbackQueued = false
   private petSaveFailed = false
   private loaded = false
+  /** A registry request is in flight. */
+  private loading = false
   private attempts = 0
   private disposed = false
   /** Pending deferred-load or retry timer; cancelled by dispose(). */
@@ -180,7 +190,8 @@ export class PetSettingsCardController {
 
   /** Resolve the registry choices once (retried a few times on failure). */
   private async loadPets(): Promise<void> {
-    if (this.loaded || this.disposed) return
+    if (this.loaded || this.disposed || this.loading) return
+    this.loading = true
     try {
       const list = await fetchPetChoices()
       if (this.disposed) return
@@ -199,7 +210,22 @@ export class PetSettingsCardController {
           void this.loadPets()
         }, 3000)
       }
+    } finally {
+      this.loading = false
     }
+  }
+
+  /**
+   * Re-read the registry on demand. The pet API is registered only while the
+   * plugin is enabled, so the first read can fail while the master switch is
+   * off; this lets the card try again the moment the switch opens instead of
+   * waiting for a page reload.
+   */
+  refreshPets(): void {
+    if (this.disposed || this.loading) return
+    this.loaded = false
+    this.attempts = 0
+    void this.loadPets()
   }
 
   private async loadPetState(): Promise<void> {
@@ -360,6 +386,7 @@ export class PetSettingsCardController {
         this.petSaveFailed = false
         this.store.set(this.projection())
       },
+      refreshPets: () => { this.refreshPets() },
     }
   }
 
@@ -392,6 +419,17 @@ export function PetSettingsCard(props: PetSettingsCardProps) {
   const { t } = props
   const state = props.usePetSettingsCard(snapshot => snapshot)
   const disabled = !state.writable
+  // The registry is read once, when the plugin starts; the pet API that serves
+  // it exists only while the master switch is on. A card that opened empty
+  // therefore asks again as soon as the switch is on, instead of leaving the
+  // picker blank until the page reloads (the deferred reads had already spent
+  // their retries while the API was absent).
+  const enabled = state.enabled.text !== 'false'
+  const hasChoices = state.petPreviews.length > 0
+  const { refreshPets } = props
+  useEffect(() => {
+    if (enabled && !hasChoices) refreshPets()
+  }, [enabled, hasChoices, refreshPets])
   const fieldProps = {
     overriddenLabel: t('settings.overridden'),
     resetLabel: t('settings.reset'),
@@ -584,10 +622,18 @@ export type PetSettingsSectionProps =
 
 /** Render the pet settings card as a first-level settings page. */
 export function PetSettingsSection(props: PetSettingsSectionProps): ReactNode {
-  const { t, usePetSettingsCard, save, discard, edit, resetField } = props
+  const { t, usePetSettingsCard, save, discard, edit, resetField, refreshPets } = props
   return (
     <ul className={sectionCss.sectionList} data-dsh-plugin="pet" data-dsh-part="panel">
-      <PetSettingsCard t={t} usePetSettingsCard={usePetSettingsCard} save={save} discard={discard} edit={edit} resetField={resetField} />
+      <PetSettingsCard
+        t={t}
+        usePetSettingsCard={usePetSettingsCard}
+        save={save}
+        discard={discard}
+        edit={edit}
+        resetField={resetField}
+        refreshPets={refreshPets}
+      />
     </ul>
   )
 }

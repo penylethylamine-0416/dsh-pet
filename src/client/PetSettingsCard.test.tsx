@@ -227,6 +227,7 @@ describe('pet settings card rendered without a Host settings form', () => {
         discard={face.discard}
         edit={face.edit}
         resetField={face.resetField}
+        refreshPets={face.refreshPets}
       />,
     )
 
@@ -265,6 +266,7 @@ describe('the status bubble switch on the Host settings form', () => {
         discard={face.discard}
         edit={face.edit}
         resetField={face.resetField}
+        refreshPets={face.refreshPets}
       />,
     )
     expect(screen.getByLabelText(t('settings.statusBubbles'))).toBeTruthy()
@@ -304,5 +306,53 @@ describe('the coarse sliders on the display fields', () => {
     expect(SIZE_RANGE).toMatchObject({ min: DISPLAY_SIZE_MIN, max: DISPLAY_SIZE_MAX })
     expect(BUBBLE_SCALE_RANGE).toMatchObject({ min: BUBBLE_SCALE_MIN, max: BUBBLE_SCALE_MAX })
     expect(INSET_RANGE.max).toBeLessThanOrEqual(DISPLAY_INSET_MAX)
+  })
+})
+
+describe('the pet registry while the plugin is off', () => {
+  it('re-reads the list when the master switch is turned on, without a page reload', async () => {
+    // Given the plugin is off, so the pet API never served the registry
+    vi.useFakeTimers()
+    const { scope } = readyForm({ enabled: false })
+    let apiServing = false
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/pet/pets') {
+        // The host registers '/api/pet/*' only while the plugin is enabled.
+        if (!apiServing) return response({ error: 'not registered' }, false)
+        return response([{ id: 'whale-girl', displayName: '鲸鱼娘' }])
+      }
+      if (path === '/api/pet/state') return response({ pet: { id: 'whale-girl' }, display: { visible: false } })
+      throw new Error('unexpected request: ' + path)
+    })
+    vi.stubGlobal('fetch', fetch)
+    const controller = new PetSettingsCardController(scope)
+    await vi.advanceTimersByTimeAsync(0)
+    const face = controller.inject()
+    const state = () => face.hooks.petSettingsCard.getSnapshot()
+
+    // When the card renders with the plugin off, there is nothing to pick
+    render(
+      <PetSettingsCard
+        t={t}
+        usePetSettingsCard={select => useSyncExternalStore(face.hooks.petSettingsCard.subscribe, () => select(face.hooks.petSettingsCard.getSnapshot()))}
+        save={face.save}
+        discard={face.discard}
+        edit={face.edit}
+        resetField={face.resetField}
+        refreshPets={face.refreshPets}
+      />,
+    )
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(state().petPreviews).toHaveLength(0)
+
+    // When the plugin is turned on, the API exists and the card asks it again
+    apiServing = true
+    face.edit('enabled', 'true')
+
+    // Then the picker fills without the reader touching the page
+    await vi.waitFor(() => { expect(state().petPreviews).toHaveLength(1) })
+    expect(state().petId.text).toBe('whale-girl')
+    controller.dispose()
   })
 })
