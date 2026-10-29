@@ -33,7 +33,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ActivityPhase, PetAnimation } from './state.ts'
 import { normalizePetRemarks, type PetRemarks, type PetRemarksManifest } from './remarks.ts'
-import { mergeVoicePacks, normalizeVoicePack, type PetPanelView, type VoicePack } from './voice-pack.ts'
+import { mergeVoicePacks, normalizeVoicePack, type LifeCategory, type PetPanelView, type VoicePack } from './voice-pack.ts'
 import { parseDecorationManifest } from './decoration.ts'
 import { imageDimensions } from './image-dimensions.ts'
 import { PET_DECORATION_API_VERSION, type DecorationView } from './contracts/status-decoration.ts'
@@ -301,6 +301,8 @@ export interface PetDefinition {
   manifestUrl: string
   /** Hover-panel chrome overrides (voice.json 'panel'; pet-center M4). */
   panel?: PetPanelView
+  /** Idle-chatter pools (voice.json 'life'), keyed by desktop context. */
+  lifeLines?: Partial<Record<LifeCategory, readonly string[]>>
 }
 
 /** A resolved pet plus its host-side file location. */
@@ -1296,9 +1298,8 @@ export function decorationView(entry: DecorationEntry): DecorationView {
  * layering (pet-center M4, issue #677).
  */
 export function petEntryView(entry: PetEntry, globalVoice?: VoicePack): PetDefinition {
-  const panel = globalVoice === undefined
-    ? entry.voice?.panel
-    : mergeVoicePacks(globalVoice, entry.voice)?.panel
+  const merged = globalVoice === undefined ? entry.voice : mergeVoicePacks(globalVoice, entry.voice)
+  const panel = merged?.panel
   return {
     id: entry.id,
     displayName: entry.displayName,
@@ -1316,6 +1317,7 @@ export function petEntryView(entry: PetEntry, globalVoice?: VoicePack): PetDefin
     atlasUrl: entry.atlasUrl,
     manifestUrl: entry.manifestUrl,
     ...(panel === undefined ? {} : { panel }),
+    ...(merged?.life === undefined ? {} : { lifeLines: merged.life }),
   }
 }
 

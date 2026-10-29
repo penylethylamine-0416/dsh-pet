@@ -133,6 +133,42 @@ export function PetDockEntry(props: PetDockEntryProps): ReactElement {
     }, () => { setSkin(persistedSkin) })
   }
 
+  // Idle chatter: while the pet has nothing to do she now and then says
+  // something about her own life, picked from the voice pack's `life` pools.
+  // The desktop category (a game, a video, an editor) tints the choice; a pool
+  // that is missing falls back to `generic`.
+  const lifeLines = definition?.lifeLines
+  const desktopCategory = snapshot?.desktop?.category
+  const phase = snapshot?.phase
+  const nextChatAtRef = useRef<number>(Date.now() + 60_000 + Math.random() * 60_000)
+  useEffect(() => {
+    if (lifeLines === undefined) return
+    const timer = setInterval(() => {
+      if (Date.now() < nextChatAtRef.current) return
+      if (phase !== 'idle' || !visible) return
+      // Desktop buckets are finer than the chatter buckets: fold them down.
+      const key = desktopCategory === 'game'
+        ? 'game'
+        : desktopCategory === 'video' || desktopCategory === 'music'
+          ? 'video'
+          : desktopCategory === 'editor' || desktopCategory === 'terminal' || desktopCategory === 'office'
+            ? 'work'
+            : undefined
+      const hour = new Date().getHours()
+      const lateNight = hour >= 23 || hour < 6
+      const pool = (key === undefined ? undefined : lifeLines[key])
+        ?? (lateNight ? lifeLines.late : undefined)
+        ?? lifeLines.generic
+      if (pool === undefined || pool.length === 0) {
+        nextChatAtRef.current = Date.now() + 60_000
+        return
+      }
+      props.remark(pool[Math.floor(Math.random() * pool.length)]!)
+      nextChatAtRef.current = Date.now() + 90_000 + Math.random() * 120_000
+    }, 10_000)
+    return () => { clearInterval(timer) }
+  }, [lifeLines, desktopCategory, phase, visible, props])
+
   if (visible) {
     return (
       <span data-pet-dock data-testid="pet-dock">

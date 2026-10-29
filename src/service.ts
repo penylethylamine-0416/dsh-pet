@@ -54,6 +54,7 @@ import {
   type PetRegistryDiagnostic,
 } from './registry.ts'
 import { WHISPER_TTL_MS, type VoicePackOverrides, type VoicePoolsProvider } from './chatter.ts'
+import { DesktopProbe, type DesktopActivity } from './desktop-activity.ts'
 import { mergeVoicePacks } from './voice-pack.ts'
 import type { PetRemarks } from './remarks.ts'
 import type { DecorationView } from './contracts/status-decoration.ts'
@@ -193,6 +194,8 @@ export interface PetStateView {
   bubble?: string
   phase: PetStateSnapshot['phase']
   sessionActive: boolean
+  /** What the user is doing on the desktop right now (idle chatter context). */
+  desktop?: DesktopActivity
   /**
    * Per-session bubbles for every concurrently active TOP-LEVEL session:
    * the GUI's current session first when reported, the rest most recently
@@ -357,6 +360,8 @@ export class PetService extends Service {
    * global pack and each entry's pack cannot change behind the cache.
    */
   private voiceCache: { petId: string; overrides: VoicePackOverrides } | undefined
+  /** Foreground-window probe feeding the idle chatter (Windows only). */
+  private readonly desktopProbe = new DesktopProbe()
   /**
    * Per-session activity, most recent last (Map insertion order). Bounded by
    * MAX_SESSION_BUBBLES so a burst of sessions cannot grow it without bound;
@@ -1139,6 +1144,7 @@ export class PetService extends Service {
       ...(announcement === undefined ? {} : { announcement }),
       ...(announcements.length === 0 ? {} : { announcements }),
       statusBubbles: this.statusBubbles,
+      ...(this.desktopProbe.read() === undefined ? {} : { desktop: this.desktopProbe.read() }),
       ...(panelActions.length === 0 ? {} : { panelActions }),
       affinity: this.ledger.affinityView(Date.now()),
       // The one place the two visibility answers are combined: the pet's own
