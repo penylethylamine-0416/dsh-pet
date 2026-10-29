@@ -40,7 +40,7 @@ import { PET_DECORATION_API_VERSION, type DecorationView } from './contracts/sta
 import { dshHome } from './dsh-home.ts'
 import { parsePetManifest, type PetManifestLive2d, type PetManifestV2, type PetRendererKind } from './manifest-v2.ts'
 import type { PetGameplayManifest } from './gameplay.ts'
-import { collectModel3References } from './model3.ts'
+import { collectModel3References, model3ExpressionNames } from './model3.ts'
 import { DEFAULT_PET_ID } from './defaults.ts'
 
 /** Fixed row order of the 9-state animation contract. */
@@ -195,6 +195,23 @@ export interface PetLive2dDefinition {
   expressions?: Partial<Record<ActivityPhase, string>>
   /** Hit area names triggering the tap motion; defaults to every model HitArea. */
   hitAreas?: string[]
+  /**
+   * Part ids treated as the eyes when the model has no eyelid rig: hidden for
+   * the blink moment instead of closing a lid.
+   */
+  blinkParts?: string[]
+  /** Expression applied for the blink moment (closes ParamEyeLOpen/ROpen). */
+  blinkExpression?: string
+  /** Selectable outfits; each applies a declared expression while selected. */
+  skins?: PetLive2dSkinDefinition[]
+}
+
+/** One selectable live2d outfit as served to the browser half. */
+export interface PetLive2dSkinDefinition {
+  id: string
+  label: string
+  /** Expression name the renderer applies (declared by the model3.json). */
+  expression: string
 }
 
 /** One frames2d track as served to the browser half. */
@@ -605,6 +622,23 @@ function resolveLive2dEntry(
   if (tracks === undefined) return undefined
   const remarks = normalizePetRemarks(manifest.remarks, message => record('warning', 'pet ' + manifest.id + ': ' + message))
   const modelUrl = assetUrl(assetPrefix, manifest.id, block.model)
+  // Outfits: an expression the model does not declare can never be applied by
+  // the engine, so the entry is dropped here (warning) instead of shipping a
+  // button that silently does nothing.
+  let skins: PetLive2dSkinDefinition[] | undefined
+  if (block.skins !== undefined) {
+    const declared = new Set(model3ExpressionNames(model3))
+    const kept: PetLive2dSkinDefinition[] = []
+    for (const skin of block.skins) {
+      if (!declared.has(skin.expression)) {
+        record('warning', 'pet ' + manifest.id + ': live2d skin ' + JSON.stringify(skin.id)
+          + ' names undeclared expression ' + JSON.stringify(skin.expression) + '; skipped')
+        continue
+      }
+      kept.push({ id: skin.id, label: skin.label, expression: skin.expression })
+    }
+    if (kept.length > 0) skins = kept
+  }
   const live2d: PetLive2dDefinition = {
     modelUrl,
     modelPath: block.model,
@@ -613,6 +647,9 @@ function resolveLive2dEntry(
     motions: block.motions,
     ...(block.expressions === undefined ? {} : { expressions: block.expressions }),
     ...(block.hitAreas === undefined ? {} : { hitAreas: block.hitAreas }),
+    ...(block.blinkParts === undefined ? {} : { blinkParts: block.blinkParts }),
+    ...(block.blinkExpression === undefined ? {} : { blinkExpression: block.blinkExpression }),
+    ...(skins === undefined ? {} : { skins }),
   }
   return {
     id: manifest.id,
@@ -629,7 +666,13 @@ function resolveLive2dEntry(
     manifestUrl: assetUrl(assetPrefix, manifest.id, 'pet.json'),
     dir,
     spritesheetPath: block.model,
-    servable: [block.model, ...references],
+    servable: [
+      block.model,
+      ...references.map(reference => {
+        const modelDir = block.model.slice(0, block.model.lastIndexOf('/') + 1)
+        return modelDir + reference
+      }),
+    ],
     ...(remarks === undefined ? {} : { remarks }),
   }
 }

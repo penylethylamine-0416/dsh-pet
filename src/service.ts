@@ -944,22 +944,30 @@ export class PetService extends Service {
   /**
    * The persisted skin for one entry, when the manifest still declares it: a
    * stale id (skin removed from the manifest, pet swapped) reads as "default"
-   * rather than pinning a track the browser half cannot resolve.
+   * rather than pinning a track the browser half cannot resolve. A pet is one
+   * renderer, so the frames2d skins and the live2d outfits share the single
+   * per-pet selection slot.
    */
   private persistedSkin(entry: NonNullable<PetRegistry['entries'][number]>): string | undefined {
     const stored = this.ledger.petSkin(entry.id)
     if (stored === undefined) return undefined
-    return entry.frames2d?.skins?.some(skin => skin.id === stored) === true ? stored : undefined
+    return this.declaredSkins(entry).some(skin => skin.id === stored) === true ? stored : undefined
+  }
+
+  /** The selectable skins/outfits one entry declares (one renderer per pet). */
+  private declaredSkins(entry: NonNullable<PetRegistry['entries'][number]>): readonly { id: string }[] {
+    return entry.frames2d?.skins ?? entry.live2d?.skins ?? []
   }
 
   /**
-   * RPC: select the current pet's frames2d skin (`undefined` restores the
-   * pet's default look). The choice is stored per pet, so every later state
-   * view (reload, client restart, pet re-selection) serves it back.
+   * RPC: select the current pet's visual skin (`undefined` restores the pet's
+   * default look). frames2d swaps the base idle track; live2d applies the
+   * outfit expression. The choice is stored per pet, so every later state view
+   * (reload, client restart, pet re-selection) serves it back.
    */
   async setSkin(skin: string | undefined): Promise<{ ok: true; skin?: string } | { ok: false; error: string }> {
     const entry = this.activeEntry()
-    const declared = entry.frames2d?.skins ?? []
+    const declared = this.declaredSkins(entry)
     if (skin === undefined) {
       this.ledger.setPetSkin(entry.id, undefined)
       this.flush()

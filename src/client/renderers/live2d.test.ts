@@ -458,6 +458,89 @@ describe('live2dRenderer', () => {
     expect(app.destroyed).toBe(1)
   })
 
+  it('applies the selected outfit expression and re-applies it after a phase change', async () => {
+    const model = fakeModel()
+    const app = fakeApp()
+    runtime.vendor = fakeVendor(model, app)
+    const { ctx, stream } = makeCtx()
+    const config = {
+      ...CONFIG,
+      expressions: { thinking: 'think' },
+      skins: [
+        { id: 'white', label: 'white', expression: 'outfit-white' },
+        { id: 'green', label: 'green', expression: 'outfit-green' },
+      ],
+    }
+    const handle = live2dRenderer.mount(ctx, live2dRenderer.validateConfig(config)) as Live2dRendererHandle
+    await flush()
+    // No selection yet: the model keeps its own default look.
+    expect(model.calls.filter(call => call[0] === 'expression')).toEqual([])
+    handle.setSkin?.('green')
+    expect(model.calls.filter(call => call[0] === 'expression')).toEqual([['expression', 'outfit-green']])
+    // A phase expression must not swap the costume back mid-scene.
+    stream.push('thinking')
+    expect(model.calls.filter(call => call[0] === 'expression')).toEqual([
+      ['expression', 'outfit-green'],
+      ['expression', 'outfit-green'],
+    ])
+    handle.setSkin?.('white')
+    expect(model.calls.filter(call => call[0] === 'expression').at(-1)).toEqual(['expression', 'outfit-white'])
+    handle.dispose()
+  })
+
+  it('breathes every frame and blinks on a head pat', async () => {
+    const model = fakeModel()
+    const ticks: (() => void)[] = []
+    const paramCalls: [string, string, number][] = []
+    const ids = ['ParamBreath', 'ParamBodyAngleX', 'ParamEyeLOpen', 'ParamEyeROpen']
+    Object.assign(model.internalModel, {
+      coreModel: {
+        getParameterIndex: (id: string) => (ids.includes(id) ? 0 : -1),
+        addParameterValueById: (id: string, value: number) => { paramCalls.push(['add', id, value]) },
+        multiplyParameterValueById: (id: string, value: number) => { paramCalls.push(['mul', id, value]) },
+      },
+      on: (event: string, fn: () => void) => { if (event === 'beforeModelUpdate') ticks.push(fn) },
+    })
+    let now = 1_000
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const app = fakeApp()
+    runtime.vendor = fakeVendor(model, app)
+    const { ctx } = makeCtx()
+    const handle = live2dRenderer.mount(ctx, live2dRenderer.validateConfig(CONFIG)) as Live2dRendererHandle
+    await flush()
+    expect(ticks).toHaveLength(1)
+    // The breath cycle rides every frame (the engine's own automator is unfed).
+    ticks[0]!()
+    expect(paramCalls.some(([kind, id]) => kind === 'add' && id === 'ParamBreath')).toBe(true)
+    expect(paramCalls.some(([kind, id]) => kind === 'add' && id === 'ParamBodyAngleX')).toBe(true)
+    // A head pat blinks even though this model declares no hit-area motion.
+    paramCalls.length = 0
+    handle.tap(10, 10)
+    // Step through the close curve; the eye openness must reach near zero.
+    let minOpen = 1
+    for (let step = 0; step < 40 && minOpen > 0.05; step += 1) {
+      now += 25
+      ticks[0]!()
+      for (const [kind, id, value] of paramCalls) {
+        if (kind === 'mul' && id === 'ParamEyeLOpen') minOpen = Math.min(minOpen, value)
+      }
+      paramCalls.length = 0
+    }
+    expect(minOpen).toBeLessThan(0.2)
+    // The idle blink is scheduled too: run the clock forward and the next blink
+    // must write the eyes without any tap.
+    paramCalls.length = 0
+    let idleBlinked = false
+    for (let step = 0; step < 200 && !idleBlinked; step += 1) {
+      now += 250
+      ticks[0]!()
+      idleBlinked = paramCalls.some(([kind, id]) => kind === 'mul' && id === 'ParamEyeROpen')
+      paramCalls.length = 0
+    }
+    expect(idleBlinked).toBe(true)
+    handle.dispose()
+  })
+
   it('validateConfig is fail-closed', () => {
     expect(() => live2dRenderer.validateConfig({})).toThrow('modelUrl')
     expect(() => live2dRenderer.validateConfig({ modelUrl: '/x' })).toThrow('motions.idle')

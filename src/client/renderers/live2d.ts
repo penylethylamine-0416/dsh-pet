@@ -44,6 +44,16 @@ export interface PetLive2dConfig {
   motions: Partial<Record<ActivityPhase, string>> & { idle: string }
   expressions?: Partial<Record<ActivityPhase, string>>
   hitAreas?: string[]
+  /** Selectable outfits: each applies its expression while selected. */
+  skins?: { id: string; label?: string; expression?: string }[]
+  /** Eye parts hidden for the blink moment when the model has no eyelid rig. */
+  blinkParts?: string[]
+  /**
+   * Expression applied for the blink moment. The expression layer is the one
+   * parameter path proven to reach the render, so a model whose eyes only close
+   * through ParamEyeLOpen needs an expression that overwrites it with 0.
+   */
+  blinkExpression?: string
 }
 
 /** Fatal mount failure codes the bridge localizes. */
@@ -55,10 +65,46 @@ export interface Live2dRendererHandle extends PetRendererHandle {
   tap(x: number, y: number): void
   /** Subscribe to fatal mount errors (at most one fires per activation). */
   onError(listener: (code: Live2dErrorCode) => void): void
+  /**
+   * Select a declared outfit (undefined restores the model's default look).
+   * The expression layer is re-applied after every phase change, so an outfit
+   * survives motion switches and taps. Optional so a host/test that predates
+   * outfits keeps a valid handle.
+   */
+  setSkin?(id: string | undefined): void
 }
 
 /** The de-facto tap-motion group of Cubism sample models. */
 const TAP_GROUP = 'TapBody'
+
+/**
+ * Idle-life tuning. The engine's own breath automator is created but never fed
+ * a parameter list (`CubismBreath.setParameters` is never called), and its
+ * eye-blink automator only runs for models that declare an EyeBlink group —
+ * which most authored pets do not. The renderer therefore drives both itself,
+ * layered onto the core parameters after motions, expressions and physics.
+ */
+/** One blink: close + hold + open (ms). */
+const BLINK_MS = 260
+/** Random idle gap between blinks (ms). */
+const BLINK_GAP_MIN = 2400
+/** Random idle gap between blinks (ms). */
+const BLINK_GAP_MAX = 6200
+/** One breath cycle (ms). */
+const BREATH_MS = 3600
+/** Breath swing on ParamBreath; Cubism's convention is a 0..1 parameter. */
+const BREATH_AMPLITUDE = 0.75
+/** Body sway in degrees, tied to the breath rhythm so the pose breathes too. */
+const BREATH_SWAY_DEGREES = 1.4
+
+/**
+ * Idle-life diagnostics: one short line per activation so a console reader can
+ * tell a stale client bundle (no line) from a model without the eye/breath
+ * parameters ('skip').
+ */
+function idleLife(stage: string, detail: Record<string, unknown>): void {
+  console.info('[dsh-pet] live2d idle life: ' + stage, detail)
+}
 
 /**
  * Keep one screen-appropriate atlas LOD instead of asking Pixi for the
@@ -150,7 +196,140 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
     let unsubscribe: (() => void) | undefined
     /** The motion group the current phase maps to (resume target after taps). */
     let phaseGroup: string = config.motions.idle
+    let currentPhase: ActivityPhase = ctx.phase.get()
+    /** The selected outfit id (undefined = the model's own default look). */
+    let activeSkin: string | undefined
     let tapPlaying = false
+    /** When the next idle blink is due (ms, performance clock). */
+    let nextBlinkAt = Number.POSITIVE_INFINITY
+    /** When the running blink started; undefined while the eyes are open. */
+    let blinkStartedAt: number | undefined
+    /** Whether the model's eyes can be driven (and the idle tick is installed). */
+    let blinkable = false
+
+    /** Randomised idle gap between blinks. */
+    const blinkGap = (): number => BLINK_GAP_MIN + Math.random() * (BLINK_GAP_MAX - BLINK_GAP_MIN)
+
+    /**
+     * Install the idle-life tick on a freshly loaded model: a randomised blink
+     * and a breath cycle layered on the core parameters. The engine emits
+     * 'beforeModelUpdate' after motions/expressions/physics and right before
+     * the core update, so writes there win for that frame without fighting any
+     * other driver. When a build has no such emitter, the same tick is wrapped
+     * around the core model's own update() instead — still the last write before
+     * the draw. Pets whose model lacks the parameters keep their own look.
+     */
+    const mountIdleLife = (loaded: Live2dVendorModel): void => {
+      const internal = loaded.internalModel
+      const core = internal.coreModel
+      if (core === undefined) return
+      const has = (id: string): boolean => {
+        if (typeof core.getParameterIndex !== 'function') return false
+        try {
+          return core.getParameterIndex(id) >= 0
+        } catch {
+          return false
+        }
+      }
+      blinkable = has('ParamEyeLOpen') && has('ParamEyeROpen')
+      const breathable = has('ParamBreath')
+      // Eye parts: a model whose eyes are painted open and whose eyelid
+      // parameter covers nothing can still blink — by hiding the eye art for
+      // the blink moment. Only parts the model actually declares are kept.
+      const eyeParts = (config.blinkParts ?? []).filter(part => {
+        if (typeof core.setPartOpacityById !== 'function') return false
+        if (typeof core.getPartIndex !== 'function') return true
+        try {
+          return core.getPartIndex(part) >= 0
+        } catch {
+          return false
+        }
+      })
+      const hideEyes = eyeParts.length > 0
+      if (!blinkable && !breathable && !hideEyes && config.blinkExpression === undefined) {
+        idleLife('skip', { blinkable, breathable })
+        return
+      }
+      const startedAt = performance.now()
+      nextBlinkAt = startedAt + blinkGap()
+      let eyesHidden = false
+      let blinkExpressionOn = false
+      const blinkExpression = config.blinkExpression
+      const tick = (): void => {
+        if (disposed) return
+        const now = performance.now()
+        if (blinkable || hideEyes || blinkExpression !== undefined) {
+          if (blinkStartedAt === undefined && now >= nextBlinkAt) blinkStartedAt = now
+          let closed = 0
+          if (blinkStartedAt !== undefined) {
+            const progress = (now - blinkStartedAt) / BLINK_MS
+            if (progress >= 1) {
+              blinkStartedAt = undefined
+              nextBlinkAt = now + blinkGap()
+            } else {
+              // Fast close, slower open: the curve that reads as a real blink.
+              closed = progress < 0.32 ? progress / 0.32 : Math.max(0, 1 - (progress - 0.32) / 0.68)
+            }
+          }
+          // The expression layer: the only path that survives the engine's
+          // per-frame parameter restore, so it is what actually closes the lids.
+          if (blinkExpression !== undefined && model !== undefined) {
+            if (blinkStartedAt !== undefined && !blinkExpressionOn) {
+              blinkExpressionOn = true
+              void model.expression(blinkExpression)
+            } else if (blinkStartedAt === undefined && blinkExpressionOn) {
+              blinkExpressionOn = false
+              const restore = skinExpression() ?? config.expressions?.[currentPhase]
+              if (restore !== undefined) void model.expression(restore)
+            }
+          }
+          if (blinkable && closed > 0) {
+            core.multiplyParameterValueById('ParamEyeLOpen', 1 - closed)
+            core.multiplyParameterValueById('ParamEyeROpen', 1 - closed)
+          }
+          if (hideEyes) {
+            // Hard cut, not a fade: a fading eye reads as transparency, a cut
+            // reads as a lid.
+            const hidden = closed > 0.35
+            if (hidden !== eyesHidden) {
+              eyesHidden = hidden
+              for (const part of eyeParts) {
+                try {
+                  core.setPartOpacityById!(part, hidden ? 0 : 1)
+                } catch { /* a model that rejects one id keeps the rest */ }
+              }
+            }
+          }
+        }
+        if (breathable) {
+          // 0..1, starting at rest so the pet does not jump on mount.
+          const phase = ((now - startedAt) % BREATH_MS) / BREATH_MS * Math.PI * 2
+          const breath = (1 - Math.cos(phase)) / 2
+          core.addParameterValueById('ParamBreath', breath * BREATH_AMPLITUDE)
+          core.addParameterValueById('ParamBodyAngleX', Math.sin(phase) * BREATH_SWAY_DEGREES)
+        }
+      }
+      if (typeof internal.on === 'function') {
+        internal.on('beforeModelUpdate', tick)
+        idleLife('mounted', { via: 'beforeModelUpdate', blinkable, breathable })
+        return
+      }
+      const coreUpdate = (core as { update?: () => void }).update
+      if (typeof coreUpdate === 'function') {
+        const original = coreUpdate.bind(core)
+        ;(core as { update?: () => void }).update = () => {
+          tick()
+          original()
+        }
+        idleLife('mounted', { via: 'core.update', blinkable, breathable })
+        return
+      }
+      idleLife('skip', { blinkable, breathable, reason: 'no hook' })
+    }
+
+    /** The expression the selected outfit applies, if any. */
+    const skinExpression = (): string | undefined =>
+      config.skins?.find(skin => skin.id === activeSkin)?.expression
 
     const stopResizeTracking = (): void => {
       resizeTracking = false
@@ -214,9 +393,12 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
     }
 
     const applyPhase = (phase: ActivityPhase): void => {
+      currentPhase = phase
       phaseGroup = config.motions[phase] ?? config.motions.idle
       playGroup(phaseGroup)
-      const expression = config.expressions?.[phase]
+      // An outfit owns the expression slot: applying a phase expression on top
+      // would swap the costume back mid-scene, so the selected skin wins.
+      const expression = skinExpression() ?? config.expressions?.[phase]
       if (expression !== undefined && model !== undefined) void model.expression(expression)
     }
 
@@ -284,6 +466,15 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
       pixiApp.stage.addChild(loaded)
       modelAttached = true
       loaded.automator.autoUpdate = true
+      // Blink + breathe: layered on the core parameters every frame.
+      mountIdleLife(loaded)
+      // Developer handle (read-only): probe a model's rig from the browser
+      // console when an authored model keys its eyes to non-standard
+      // parameters. Never consulted by the renderer itself.
+      ;(globalThis as Record<string, unknown>).__dshPetLive2dDebug = {
+        core: loaded.internalModel.coreModel,
+        model: loaded,
+      }
       // Resume the phase group once a tap motion finishes playing.
       loaded.on('motionFinish', () => {
         if (tapPlaying) {
@@ -312,6 +503,9 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
       tap(x: number, y: number) {
         const current = model
         if (disposed || current === undefined) return
+        // Petting always blinks — even a tap that misses every hit area is a
+        // head pat as far as the reader is concerned.
+        if (blinkable) blinkStartedAt = performance.now()
         const hits = current.hitTest(x, y)
         const allowed = config.hitAreas
         const hit = allowed === undefined ? hits.length > 0 : hits.some(name => allowed.includes(name))
@@ -322,6 +516,14 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
         tapPlaying = true
         const index = group.length > 1 ? Math.floor(Math.random() * group.length) : 0
         void current.motion(TAP_GROUP, index)
+      },
+      setSkin(id: string | undefined) {
+        if (disposed) return
+        activeSkin = id
+        // The model may not be loaded yet: boot's applyPhase resolves the
+        // selected outfit once the engine exists.
+        const expression = skinExpression() ?? config.expressions?.[currentPhase]
+        if (expression !== undefined && model !== undefined) void model.expression(expression)
       },
       onError(listener: (code: Live2dErrorCode) => void) {
         errorListener = listener

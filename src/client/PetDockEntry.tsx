@@ -12,7 +12,7 @@
  * @module @linxin666/dsh-pet/client/PetDockEntry
  */
 
-import { useEffect, useRef, useSyncExternalStore, type ReactElement } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PetDisplayConfig } from '../persist.ts'
 import type { PetStoreInstance } from './pet-store.ts'
@@ -103,6 +103,20 @@ export function PetDockEntry(props: PetDockEntryProps): ReactElement {
   }
   const aux = auxRef.current
   const gameplay = definition?.gameplay
+  // Live2d outfit selection: rendered optimistically (the world would otherwise
+  // change only on the next poll tick), then reconciled with the host snapshot —
+  // a rejected write falls back to the persisted choice.
+  const persistedSkin = snapshot?.skin
+  const [skin, setSkin] = useState<string | undefined>(persistedSkin)
+  useEffect(() => {
+    setSkin(persistedSkin)
+  }, [definition?.id, persistedSkin])
+  const chooseSkin = (id: string | undefined): void => {
+    setSkin(id)
+    void props.gameplay.setSkin(id).then((result) => {
+      if (!result.ok) setSkin(persistedSkin)
+    }, () => { setSkin(persistedSkin) })
+  }
 
   if (visible) {
     return (
@@ -113,6 +127,7 @@ export function PetDockEntry(props: PetDockEntryProps): ReactElement {
             <PetRendererSwitch
               definition={definition}
               phase={snapshot?.phase ?? 'idle'}
+              {...(skin === undefined ? {} : { skin })}
               onPet={props.pet}
               {...(aux === null ? {} : { drag: aux.drag, bus: aux.bus })}
               t={props.t}
@@ -128,6 +143,8 @@ export function PetDockEntry(props: PetDockEntryProps): ReactElement {
                 onDragEnd={props.dragEnd}
                 onRename={props.rename}
                 onPanelAction={props.panelAction}
+                {...(skin === undefined ? {} : { skin })}
+                {...(definition.live2d?.skins === undefined ? {} : { onSkin: chooseSkin })}
                 onOpenSession={props.openSession}
                 onFeedbackDone={props.feedbackDone}
                 portalTarget={props.portalTarget}

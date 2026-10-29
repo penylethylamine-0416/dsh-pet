@@ -43,6 +43,21 @@ export interface Live2dVendorModel {
       motions?: Record<string, unknown[]>
       hitAreas?: readonly { Name?: string }[]
     }
+    /** Cubism core model wrapper: parameters (and their blend APIs) live here. */
+    coreModel?: {
+      getParameterIndex?(id: string): number
+      getParameterValueById?(id: string): number
+      getPartIndex?(id: string): number
+      setPartOpacityById?(partId: string, opacity: number): void
+      addParameterValueById(id: string, value: number, weight?: number): void
+      multiplyParameterValueById(id: string, value: number, weight?: number): void
+    }
+    /**
+     * The engine emits 'beforeModelUpdate' inside update() right before the
+     * core model is drawn — after motions, expressions, physics and pose — so
+     * a listener there is the sanctioned place to layer parameter animation.
+     */
+    on?(event: string, fn: () => void): unknown
   }
   motion(group: string, index?: number): Promise<unknown>
   expression(name?: string): unknown
