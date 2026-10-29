@@ -218,6 +218,8 @@ export interface PetLive2dSkinDefinition {
   expressions?: Partial<Record<ActivityPhase, string>>
   /** Blink expression composed with this outfit (keeps the costume on a blink). */
   blinkExpression?: string
+  /** Lines the pet says when this outfit is chosen. */
+  switchLines?: string[]
 }
 
 /** One frames2d track as served to the browser half. */
@@ -647,6 +649,7 @@ function resolveLive2dEntry(
         expression: skin.expression,
         ...(skin.expressions === undefined ? {} : { expressions: skin.expressions }),
         ...(skin.blinkExpression === undefined ? {} : { blinkExpression: skin.blinkExpression }),
+        ...(skin.switchLines === undefined ? {} : { switchLines: skin.switchLines }),
       })
     }
     if (kept.length > 0) skins = kept

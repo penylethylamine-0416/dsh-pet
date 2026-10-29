@@ -51,6 +51,8 @@ export interface PetInjected {
   openSession: (sessionId: string) => void
   /** Clear the reaction bubble. */
   feedbackDone: () => void
+  /** Show a one-off line in the pet's bubble. */
+  remark: (text: string) => void
   /** Gameplay verb API (miku-pet generalization); wired but unused for pets without a gameplay block. */
   gameplay: GameplayApi
 }
@@ -122,6 +124,10 @@ export function PetDockEntry(props: PetDockEntryProps): ReactElement {
   }, [definition?.id, persistedSkin])
   const chooseSkin = (id: string | undefined): void => {
     setSkin(id)
+    const lines = definition?.live2d?.skins?.find(candidate => candidate.id === id)?.switchLines
+    if (lines !== undefined && lines.length > 0) {
+      props.remark(lines[Math.floor(Math.random() * lines.length)]!)
+    }
     void props.gameplay.setSkin(id).then((result) => {
       if (!result.ok) setSkin(persistedSkin)
     }, () => { setSkin(persistedSkin) })

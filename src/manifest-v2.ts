@@ -125,6 +125,8 @@ export interface PetManifestLive2dSkin {
    * duration of every blink.
    */
   blinkExpression?: string
+  /** Lines the pet says when this outfit is chosen (bubble copy, one at random). */
+  switchLines?: string[]
 }
 
 /** One frames2d track: an ordered frame sequence plus its rhythm. */
@@ -244,7 +246,7 @@ export const KNOWN_SPRITE2D = new Set(['spritesheetPath', 'cell', 'columns', 'at
 /** live2d block field allow-list (drift-locked to the schema file). */
 export const KNOWN_LIVE2D = new Set(['model', 'scale', 'translate', 'motions', 'expressions', 'hitAreas', 'lipSync', 'blinkParts', 'blinkExpression', 'expressionHold', 'skins'])
 /** live2d skin entry field allow-list (drift-locked to the schema file). */
-export const KNOWN_LIVE2D_SKIN = new Set(['id', 'label', 'expression', 'expressions', 'blinkExpression'])
+export const KNOWN_LIVE2D_SKIN = new Set(['id', 'label', 'expression', 'expressions', 'blinkExpression', 'switchLines'])
 /** Max selectable outfits a live2d manifest may declare. */
 export const LIVE2D_MAX_SKINS = 8
 /** Skin/outfit id shape: lowercase kebab, the manifest's stable selection key. */
@@ -267,6 +269,13 @@ export const FRAMES2D_MAX_SKIN_GAMEPLAY = 8
 const SKIN_CLICK_MAX_PHRASES = 5
 /** Max length of one spoken line. */
 const SKIN_CLICK_PHRASE_MAX_LENGTH = 120
+
+/** Optional outfit-change lines: 1..6 short strings. */
+function parseSwitchLines(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 6) return undefined
+  const lines = raw.filter((line): line is string => typeof line === 'string').map(line => line.trim()).filter(line => line !== '' && line.length <= 80)
+  return lines.length > 0 ? lines : undefined
+}
 
 /** Validate a skin click action's optional phrase pool (same spirit as gameplay phrases). */
 function parseSkinPhrases(raw: unknown, field: string, diag: Diagnostics): string[] | undefined {
@@ -534,6 +543,7 @@ function parseLive2dBlock(raw: unknown, diag: Diagnostics): PetManifestLive2d | 
           ...(typeof entry.blinkExpression === 'string' && entry.blinkExpression.trim() !== ''
             ? { blinkExpression: entry.blinkExpression.trim() }
             : {}),
+          ...(parseSwitchLines(entry.switchLines) === undefined ? {} : { switchLines: parseSwitchLines(entry.switchLines)! }),
         })
       }
       if (skins.length > 0) block.skins = skins

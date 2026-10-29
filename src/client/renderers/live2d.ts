@@ -53,6 +53,8 @@ export interface PetLive2dConfig {
     expressions?: Partial<Record<ActivityPhase, string>>
     /** Blink expression composed with this outfit. */
     blinkExpression?: string
+    /** Lines the browser half shows when this outfit is chosen. */
+    switchLines?: string[]
   }[]
   /** Eye parts hidden for the blink moment when the model has no eyelid rig. */
   blinkParts?: string[]
