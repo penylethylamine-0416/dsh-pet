@@ -80,6 +80,12 @@ export interface PetManifestLive2d {
    */
   blinkParts?: string[]
   /**
+   * Extra milliseconds an emotion expression stays on screen after its phase
+   * ended (per phase). The host owns how long a phase itself lasts, so this is
+   * how a cry can linger past the failure window.
+   */
+  expressionHold?: Partial<Record<ActivityPhase, number>>
+  /**
    * Expression the renderer applies for the blink moment. Use it when the model
    * closes its eyes through ParamEyeLOpen/ParamEyeROpen only: an expression that
    * overwrites them with 0 is the one path that survives the engine's per-frame
@@ -107,6 +113,18 @@ export interface PetManifestLive2dSkin {
   label: string
   /** Name of an expression declared by the model3.json `Expressions` list. */
   expression: string
+  /**
+   * Per-phase emotion expressions composed WITH this outfit (the expression
+   * slot holds one expression at a time, so a costume that must survive an
+   * emotion needs the outfit parameter baked into the emotion's file).
+   */
+  expressions?: Partial<Record<ActivityPhase, string>>
+  /**
+   * Blink expression composed with this outfit. The expression slot holds one
+   * expression at a time, so a shared blink file would drop the costume for the
+   * duration of every blink.
+   */
+  blinkExpression?: string
 }
 
 /** One frames2d track: an ordered frame sequence plus its rhythm. */
@@ -224,9 +242,9 @@ export const KNOWN_TOP_LEVEL = new Set([
 /** sprite2d block field allow-list (drift-locked to the schema file). */
 export const KNOWN_SPRITE2D = new Set(['spritesheetPath', 'cell', 'columns', 'atlasRows', 'frames', 'tracks'])
 /** live2d block field allow-list (drift-locked to the schema file). */
-export const KNOWN_LIVE2D = new Set(['model', 'scale', 'translate', 'motions', 'expressions', 'hitAreas', 'lipSync', 'blinkParts', 'blinkExpression', 'skins'])
+export const KNOWN_LIVE2D = new Set(['model', 'scale', 'translate', 'motions', 'expressions', 'hitAreas', 'lipSync', 'blinkParts', 'blinkExpression', 'expressionHold', 'skins'])
 /** live2d skin entry field allow-list (drift-locked to the schema file). */
-export const KNOWN_LIVE2D_SKIN = new Set(['id', 'label', 'expression'])
+export const KNOWN_LIVE2D_SKIN = new Set(['id', 'label', 'expression', 'expressions', 'blinkExpression'])
 /** Max selectable outfits a live2d manifest may declare. */
 export const LIVE2D_MAX_SKINS = 8
 /** Skin/outfit id shape: lowercase kebab, the manifest's stable selection key. */
@@ -450,6 +468,26 @@ function parseLive2dBlock(raw: unknown, diag: Diagnostics): PetManifestLive2d | 
       block.blinkExpression = raw.blinkExpression.trim()
     }
   }
+  // Optional per-phase expression hold: how long an emotion outlives its phase.
+  if (raw.expressionHold !== undefined) {
+    if (!isRecord(raw.expressionHold)) {
+      diag.error('live2d.expressionHold must be an object mapping phases to milliseconds')
+    } else {
+      const hold: Partial<Record<ActivityPhase, number>> = {}
+      for (const [phase, value] of Object.entries(raw.expressionHold)) {
+        if (!PET_ACTIVITY_PHASES.includes(phase as ActivityPhase)) {
+          diag.error('live2d.expressionHold: unknown phase ' + JSON.stringify(phase))
+          continue
+        }
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 60_000) {
+          diag.error('live2d.expressionHold.' + phase + ' must be milliseconds in [0, 60000]')
+          continue
+        }
+        hold[phase as ActivityPhase] = Math.round(value)
+      }
+      if (Object.keys(hold).length > 0) block.expressionHold = hold
+    }
+  }
   // Optional outfits: each selects one expression the model declares, so the
   // costume swap rides the expression layer (no extra textures, no lost
   // motion binding). id/label are UI-facing; expression is structure.
@@ -487,7 +525,16 @@ function parseLive2dBlock(raw: unknown, diag: Diagnostics): PetManifestLive2d | 
           diag.error(field + '.expression must name an expression declared by the model (at most 64 chars)')
           continue
         }
-        skins.push({ id, label, expression })
+        const skinExpressions = parsePhaseStringMap(entry.expressions, field + '.expressions', diag)
+        skins.push({
+          id,
+          label,
+          expression,
+          ...(skinExpressions === undefined ? {} : { expressions: skinExpressions }),
+          ...(typeof entry.blinkExpression === 'string' && entry.blinkExpression.trim() !== ''
+            ? { blinkExpression: entry.blinkExpression.trim() }
+            : {}),
+        })
       }
       if (skins.length > 0) block.skins = skins
     }

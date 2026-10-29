@@ -202,6 +202,8 @@ export interface PetLive2dDefinition {
   blinkParts?: string[]
   /** Expression applied for the blink moment (closes ParamEyeLOpen/ROpen). */
   blinkExpression?: string
+  /** Extra milliseconds an emotion expression stays up after its phase ends. */
+  expressionHold?: Partial<Record<ActivityPhase, number>>
   /** Selectable outfits; each applies a declared expression while selected. */
   skins?: PetLive2dSkinDefinition[]
 }
@@ -212,6 +214,10 @@ export interface PetLive2dSkinDefinition {
   label: string
   /** Expression name the renderer applies (declared by the model3.json). */
   expression: string
+  /** Per-phase emotion expressions composed with this outfit. */
+  expressions?: Partial<Record<ActivityPhase, string>>
+  /** Blink expression composed with this outfit (keeps the costume on a blink). */
+  blinkExpression?: string
 }
 
 /** One frames2d track as served to the browser half. */
@@ -635,7 +641,13 @@ function resolveLive2dEntry(
           + ' names undeclared expression ' + JSON.stringify(skin.expression) + '; skipped')
         continue
       }
-      kept.push({ id: skin.id, label: skin.label, expression: skin.expression })
+      kept.push({
+        id: skin.id,
+        label: skin.label,
+        expression: skin.expression,
+        ...(skin.expressions === undefined ? {} : { expressions: skin.expressions }),
+        ...(skin.blinkExpression === undefined ? {} : { blinkExpression: skin.blinkExpression }),
+      })
     }
     if (kept.length > 0) skins = kept
   }
@@ -649,6 +661,7 @@ function resolveLive2dEntry(
     ...(block.hitAreas === undefined ? {} : { hitAreas: block.hitAreas }),
     ...(block.blinkParts === undefined ? {} : { blinkParts: block.blinkParts }),
     ...(block.blinkExpression === undefined ? {} : { blinkExpression: block.blinkExpression }),
+    ...(block.expressionHold === undefined ? {} : { expressionHold: block.expressionHold }),
     ...(skins === undefined ? {} : { skins }),
   }
   return {

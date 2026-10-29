@@ -43,6 +43,8 @@ export interface Live2dVendorModel {
       motions?: Record<string, unknown[]>
       hitAreas?: readonly { Name?: string }[]
     }
+    /** The motion manager: currentGroup is the group actually playing. */
+    motionManager?: { currentGroup?: string }
     /** Cubism core model wrapper: parameters (and their blend APIs) live here. */
     coreModel?: {
       getParameterIndex?(id: string): number
@@ -59,7 +61,7 @@ export interface Live2dVendorModel {
      */
     on?(event: string, fn: () => void): unknown
   }
-  motion(group: string, index?: number): Promise<unknown>
+  motion(group: string, index?: number, priority?: number): Promise<unknown>
   expression(name?: string): unknown
   hitTest(x: number, y: number): string[]
   on(event: string, fn: () => void): unknown

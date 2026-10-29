@@ -45,9 +45,23 @@ export interface PetLive2dConfig {
   expressions?: Partial<Record<ActivityPhase, string>>
   hitAreas?: string[]
   /** Selectable outfits: each applies its expression while selected. */
-  skins?: { id: string; label?: string; expression?: string }[]
+  skins?: {
+    id: string
+    label?: string
+    expression?: string
+    /** Per-phase emotions composed with this outfit. */
+    expressions?: Partial<Record<ActivityPhase, string>>
+    /** Blink expression composed with this outfit. */
+    blinkExpression?: string
+  }[]
   /** Eye parts hidden for the blink moment when the model has no eyelid rig. */
   blinkParts?: string[]
+  /**
+   * Extra time (ms) an emotion expression stays on screen after its phase ends,
+   * per phase. The host owns a phase's length; this lets a costume-heavy
+   * emotion such as a cry linger without touching the host's timing.
+   */
+  expressionHold?: Partial<Record<ActivityPhase, number>>
   /**
    * Expression applied for the blink moment. The expression layer is the one
    * parameter path proven to reach the render, so a model whose eyes only close
@@ -76,6 +90,11 @@ export interface Live2dRendererHandle extends PetRendererHandle {
 
 /** The de-facto tap-motion group of Cubism sample models. */
 const TAP_GROUP = 'TapBody'
+/**
+ * CubismMotionPriority.Force: the idle motion loops forever, so a phase change
+ * (or a tap) must interrupt it explicitly — a lower priority is refused.
+ */
+const MOTION_PRIORITY_FORCE = 3
 
 /**
  * Idle-life tuning. The engine's own breath automator is created but never fed
@@ -90,17 +109,11 @@ const BLINK_MS = 260
 const BLINK_GAP_MIN = 2400
 /** Random idle gap between blinks (ms). */
 const BLINK_GAP_MAX = 6200
-/** One breath cycle (ms). */
-const BREATH_MS = 3600
-/** Breath swing on ParamBreath; Cubism's convention is a 0..1 parameter. */
-const BREATH_AMPLITUDE = 0.75
-/** Body sway in degrees, tied to the breath rhythm so the pose breathes too. */
-const BREATH_SWAY_DEGREES = 1.4
 
 /**
  * Idle-life diagnostics: one short line per activation so a console reader can
- * tell a stale client bundle (no line) from a model without the eye/breath
- * parameters ('skip').
+ * tell a stale client bundle (no line) from a model without the eye parameters
+ * ('skip').
  */
 function idleLife(stage: string, detail: Record<string, unknown>): void {
   console.info('[dsh-pet] live2d idle life: ' + stage, detail)
@@ -232,7 +245,6 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
         }
       }
       blinkable = has('ParamEyeLOpen') && has('ParamEyeROpen')
-      const breathable = has('ParamBreath')
       // Eye parts: a model whose eyes are painted open and whose eyelid
       // parameter covers nothing can still blink — by hiding the eye art for
       // the blink moment. Only parts the model actually declares are kept.
@@ -246,19 +258,40 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
         }
       })
       const hideEyes = eyeParts.length > 0
-      if (!blinkable && !breathable && !hideEyes && config.blinkExpression === undefined) {
-        idleLife('skip', { blinkable, breathable })
+      // A blink replaces the expression slot, so a shared blink file would drop
+      // the costume for every blink; a per-skin file keeps it on.
+      const hasBlinkFile = config.blinkExpression !== undefined
+        || (config.skins ?? []).some(skin => skin.blinkExpression !== undefined)
+      if (!blinkable && !hideEyes && !hasBlinkFile) {
+        idleLife('skip', { blinkable })
         return
       }
+      // Watchdog: a looping motion (a manual play, a stranded hold) must not
+      // outlive its phase. Every couple of seconds the renderer re-asserts the
+      // group the current phase asks for, unless a hold is deliberately running.
+      motionWatchdog = setInterval(() => {
+        if (disposed || emotionTimer !== undefined || model === undefined) return
+        if (performance.now() < manualPlayUntil) return
+        const target = config.motions[currentPhase] ?? config.motions.idle
+        // Read the engine's own record: a motion started outside the renderer
+        // (a manual play, a stray low-priority start) never touched ours.
+        const current = model.internalModel.motionManager?.currentGroup
+        const stray = current !== undefined && current !== '' && current !== target
+        if (stray || playingGroup !== target) playGroup(target)
+      }, 2_000)
       const startedAt = performance.now()
       nextBlinkAt = startedAt + blinkGap()
       let eyesHidden = false
       let blinkExpressionOn = false
-      const blinkExpression = config.blinkExpression
+      /** The blink file for the outfit being worn (a shared one would drop it). */
+      const blinkExpressionFor = (): string | undefined => {
+        const skin = config.skins?.find(candidate => candidate.id === activeSkin)
+        return skin?.blinkExpression ?? config.blinkExpression
+      }
       const tick = (): void => {
         if (disposed) return
         const now = performance.now()
-        if (blinkable || hideEyes || blinkExpression !== undefined) {
+        if (blinkable || hideEyes || hasBlinkFile) {
           if (blinkStartedAt === undefined && now >= nextBlinkAt) blinkStartedAt = now
           let closed = 0
           if (blinkStartedAt !== undefined) {
@@ -273,14 +306,14 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
           }
           // The expression layer: the only path that survives the engine's
           // per-frame parameter restore, so it is what actually closes the lids.
-          if (blinkExpression !== undefined && model !== undefined) {
+          const blinkFile = blinkExpressionFor()
+          if (blinkFile !== undefined && model !== undefined) {
             if (blinkStartedAt !== undefined && !blinkExpressionOn) {
               blinkExpressionOn = true
-              void model.expression(blinkExpression)
+              void model.expression(blinkFile)
             } else if (blinkStartedAt === undefined && blinkExpressionOn) {
               blinkExpressionOn = false
-              const restore = skinExpression() ?? config.expressions?.[currentPhase]
-              if (restore !== undefined) void model.expression(restore)
+              restoreExpression()
             }
           }
           if (blinkable && closed > 0) {
@@ -301,17 +334,10 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
             }
           }
         }
-        if (breathable) {
-          // 0..1, starting at rest so the pet does not jump on mount.
-          const phase = ((now - startedAt) % BREATH_MS) / BREATH_MS * Math.PI * 2
-          const breath = (1 - Math.cos(phase)) / 2
-          core.addParameterValueById('ParamBreath', breath * BREATH_AMPLITUDE)
-          core.addParameterValueById('ParamBodyAngleX', Math.sin(phase) * BREATH_SWAY_DEGREES)
-        }
       }
       if (typeof internal.on === 'function') {
         internal.on('beforeModelUpdate', tick)
-        idleLife('mounted', { via: 'beforeModelUpdate', blinkable, breathable })
+        idleLife('mounted', { via: 'beforeModelUpdate', blinkable })
         return
       }
       const coreUpdate = (core as { update?: () => void }).update
@@ -321,10 +347,10 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
           tick()
           original()
         }
-        idleLife('mounted', { via: 'core.update', blinkable, breathable })
+        idleLife('mounted', { via: 'core.update', blinkable })
         return
       }
-      idleLife('skip', { blinkable, breathable, reason: 'no hook' })
+      idleLife('skip', { blinkable, reason: 'no hook' })
     }
 
     /** The expression the selected outfit applies, if any. */
@@ -379,7 +405,7 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
       }
     }
 
-    const playGroup = (group: string): void => {
+    const playGroup = (group: string, wanted?: number): void => {
       if (model === undefined) return
       const groups = model.internalModel.settings.motions ?? {}
       const count = Array.isArray(groups[group]) ? groups[group]!.length : 0
@@ -388,18 +414,80 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
         if (group !== config.motions.idle) playGroup(config.motions.idle)
         return
       }
-      const index = count > 1 ? Math.floor(Math.random() * count) : 0
-      void model.motion(group, index)
+      const requested = wanted !== undefined && wanted >= 0 && wanted < count ? wanted : undefined
+      const index = requested ?? (count > 1 ? Math.floor(Math.random() * count) : 0)
+      playingGroup = group
+      void model.motion(group, index, MOTION_PRIORITY_FORCE)
+    }
+
+    /** The emotion currently holding the expression slot (undefined = outfit). */
+    let activeEmotion: string | undefined
+    let emotionTimer: ReturnType<typeof setTimeout> | undefined
+    /** The motion group this renderer last asked the engine to play. */
+    let playingGroup: string | undefined
+    let motionWatchdog: ReturnType<typeof setInterval> | undefined
+    /** Manual play() keeps the stage until this timestamp (ms). */
+    let manualPlayUntil = 0
+    const clearEmotionTimer = (): void => {
+      if (emotionTimer !== undefined) {
+        clearTimeout(emotionTimer)
+        emotionTimer = undefined
+      }
+    }
+    /** The expression that should own the slot right now. */
+    const currentExpression = (): string | undefined => activeEmotion ?? skinExpression()
+    const restoreExpression = (): void => {
+      const expression = currentExpression()
+      if (expression !== undefined && model !== undefined) void model.expression(expression)
+    }
+
+    /**
+     * The expression a phase should apply for the outfit currently worn: the
+     * skin may declare its own composed file (outfit parameter baked in), so an
+     * emotion never drops the costume.
+     */
+    const emotionFor = (phase: ActivityPhase): string | undefined => {
+      const declared = config.expressions?.[phase]
+      if (declared === undefined) return undefined
+      const skin = config.skins?.find(candidate => candidate.id === activeSkin)
+      return skin?.expressions?.[phase] ?? declared
     }
 
     const applyPhase = (phase: ActivityPhase): void => {
+      const previous = currentPhase
       currentPhase = phase
-      phaseGroup = config.motions[phase] ?? config.motions.idle
-      playGroup(phaseGroup)
-      // An outfit owns the expression slot: applying a phase expression on top
-      // would swap the costume back mid-scene, so the selected skin wins.
-      const expression = skinExpression() ?? config.expressions?.[phase]
-      if (expression !== undefined && model !== undefined) void model.expression(expression)
+      const nextGroup = config.motions[phase] ?? config.motions.idle
+      idleLife('phase', { phase, group: nextGroup })
+      clearEmotionTimer()
+      // A phase may declare an expression emotion; the outfit expression takes
+      // the slot back on every phase that declares none.
+      const declared = emotionFor(phase)
+      if (declared !== undefined) {
+        activeEmotion = declared
+        phaseGroup = nextGroup
+        playGroup(nextGroup)
+        if (model !== undefined) void model.expression(declared)
+        return
+      }
+      activeEmotion = undefined
+      // A hold keeps the ending phase's MOTION (and any expression) on screen
+      // while the pet settles — never into a new working phase. The motion is
+      // what carries the head shake, so it has to stay for the cry to read.
+      const holdMs = config.expressionHold?.[previous] ?? 0
+      const settling = phase === 'idle' || phase === 'waiting' || phase === 'review'
+      if (holdMs > 0 && settling) {
+        emotionTimer = setTimeout(() => {
+          emotionTimer = undefined
+          idleLife('emotion-end', { phase: previous })
+          phaseGroup = nextGroup
+          playGroup(nextGroup)
+          restoreExpression()
+        }, holdMs)
+        return
+      }
+      phaseGroup = nextGroup
+      playGroup(nextGroup)
+      restoreExpression()
     }
 
     const boot = async (): Promise<void> => {
@@ -468,12 +556,22 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
       loaded.automator.autoUpdate = true
       // Blink + breathe: layered on the core parameters every frame.
       mountIdleLife(loaded)
+      idleLife('groups', { groups: Object.keys(loaded.internalModel.settings.motions ?? {}) })
       // Developer handle (read-only): probe a model's rig from the browser
       // console when an authored model keys its eyes to non-standard
       // parameters. Never consulted by the renderer itself.
       ;(globalThis as Record<string, unknown>).__dshPetLive2dDebug = {
         core: loaded.internalModel.coreModel,
         model: loaded,
+        /**
+         * Play a motion group through the renderer (so the watchdog knows about
+         * it and hands the pet back to its phase's group within a couple of
+         * seconds). Calling model.motion() directly bypasses that bookkeeping.
+         */
+        play: (group: string, index?: number) => {
+          manualPlayUntil = performance.now() + 6_000
+          playGroup(group, index)
+        },
       }
       // Resume the phase group once a tap motion finishes playing.
       loaded.on('motionFinish', () => {
@@ -498,6 +596,11 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
       dispose() {
         if (disposed) return
         disposed = true
+        clearEmotionTimer()
+        if (motionWatchdog !== undefined) {
+          clearInterval(motionWatchdog)
+          motionWatchdog = undefined
+        }
         destroyResources()
       },
       tap(x: number, y: number) {
@@ -515,15 +618,24 @@ export const live2dRenderer: PetRenderer<PetLive2dConfig> = {
         if (!Array.isArray(group) || group.length === 0) return
         tapPlaying = true
         const index = group.length > 1 ? Math.floor(Math.random() * group.length) : 0
-        void current.motion(TAP_GROUP, index)
+        void current.motion(TAP_GROUP, index, MOTION_PRIORITY_FORCE)
       },
       setSkin(id: string | undefined) {
         if (disposed) return
         activeSkin = id
         // The model may not be loaded yet: boot's applyPhase resolves the
         // selected outfit once the engine exists.
-        const expression = skinExpression() ?? config.expressions?.[currentPhase]
-        if (expression !== undefined && model !== undefined) void model.expression(expression)
+        // While a declared emotion owns the slot, switching the outfit swaps to
+        // that outfit's composed emotion file instead of dropping the emotion.
+        if (activeEmotion !== undefined) {
+          const emotion = emotionFor(currentPhase)
+          if (emotion !== undefined) {
+            activeEmotion = emotion
+            if (model !== undefined) void model.expression(emotion)
+            return
+          }
+        }
+        restoreExpression()
       },
       onError(listener: (code: Live2dErrorCode) => void) {
         errorListener = listener

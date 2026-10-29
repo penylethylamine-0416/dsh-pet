@@ -108,8 +108,17 @@ export function PetDockEntry(props: PetDockEntryProps): ReactElement {
   // a rejected write falls back to the persisted choice.
   const persistedSkin = snapshot?.skin
   const [skin, setSkin] = useState<string | undefined>(persistedSkin)
+  const skinPetRef = useRef<string | undefined>(definition?.id)
   useEffect(() => {
-    setSkin(persistedSkin)
+    if (skinPetRef.current !== definition?.id) {
+      // A different pet carries its own persisted choice.
+      skinPetRef.current = definition?.id
+      setSkin(persistedSkin)
+      return
+    }
+    // A poll that momentarily serves no skin must not clear the worn outfit:
+    // the outfit only changes when the user picks one.
+    if (persistedSkin !== undefined) setSkin(persistedSkin)
   }, [definition?.id, persistedSkin])
   const chooseSkin = (id: string | undefined): void => {
     setSkin(id)

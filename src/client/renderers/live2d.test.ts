@@ -458,7 +458,7 @@ describe('live2dRenderer', () => {
     expect(app.destroyed).toBe(1)
   })
 
-  it('applies the selected outfit expression and re-applies it after a phase change', async () => {
+  it('applies the selected outfit and lets a declared phase emotion take the slot', async () => {
     const model = fakeModel()
     const app = fakeApp()
     runtime.vendor = fakeVendor(model, app)
@@ -477,22 +477,81 @@ describe('live2dRenderer', () => {
     expect(model.calls.filter(call => call[0] === 'expression')).toEqual([])
     handle.setSkin?.('green')
     expect(model.calls.filter(call => call[0] === 'expression')).toEqual([['expression', 'outfit-green']])
-    // A phase expression must not swap the costume back mid-scene.
+    // A phase that declares an emotion takes the expression slot ...
     stream.push('thinking')
-    expect(model.calls.filter(call => call[0] === 'expression')).toEqual([
-      ['expression', 'outfit-green'],
-      ['expression', 'outfit-green'],
-    ])
+    expect(model.calls.filter(call => call[0] === 'expression').at(-1)).toEqual(['expression', 'think'])
+    // ... and the outfit takes it back on a phase that declares none.
+    stream.push('tool')
+    expect(model.calls.filter(call => call[0] === 'expression').at(-1)).toEqual(['expression', 'outfit-green'])
     handle.setSkin?.('white')
     expect(model.calls.filter(call => call[0] === 'expression').at(-1)).toEqual(['expression', 'outfit-white'])
     handle.dispose()
   })
 
-  it('breathes every frame and blinks on a head pat', async () => {
+  it('holds an emotion expression for the declared time after its phase ends', async () => {
+    const model = fakeModel()
+    const app = fakeApp()
+    runtime.vendor = fakeVendor(model, app)
+    const { ctx, stream } = makeCtx()
+    const config = {
+      ...CONFIG,
+      expressions: { failed: 'cry' },
+      expressionHold: { failed: 5_000 },
+      skins: [{ id: 'white', label: 'white', expression: 'outfit-white' }],
+    }
+    vi.useFakeTimers()
+    try {
+      const handle = live2dRenderer.mount(ctx, live2dRenderer.validateConfig(config)) as Live2dRendererHandle
+      await flush()
+      // An outfit must be selected for the expression to return to it.
+      handle.setSkin?.('white')
+      const lastExpression = (): unknown =>
+        model.calls.filter(call => call[0] === 'expression').at(-1)
+      stream.push('failed')
+      expect(lastExpression()).toEqual(['expression', 'cry'])
+      // The phase ended, but the declared hold keeps the cry up.
+      stream.push('idle')
+      expect(lastExpression()).toEqual(['expression', 'cry'])
+      vi.advanceTimersByTime(5_000)
+      expect(lastExpression()).toEqual(['expression', 'outfit-white'])
+      handle.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('plays the worn outfit composed emotion so the costume survives', async () => {
+    const model = fakeModel()
+    const app = fakeApp()
+    runtime.vendor = fakeVendor(model, app)
+    const { ctx, stream } = makeCtx()
+    const config = {
+      ...CONFIG,
+      expressions: { failed: 'cry' },
+      skins: [
+        { id: 'white', label: 'white', expression: 'outfit-white', expressions: { failed: 'white-cry' } },
+        { id: 'green', label: 'green', expression: 'outfit-green', expressions: { failed: 'green-cry' } },
+      ],
+    }
+    const handle = live2dRenderer.mount(ctx, live2dRenderer.validateConfig(config)) as Live2dRendererHandle
+    await flush()
+    const calls = (): unknown[] => model.calls.filter(call => call[0] === 'expression')
+    handle.setSkin?.('green')
+    expect(calls().at(-1)).toEqual(['expression', 'outfit-green'])
+    // The emotion is the green outfit's own composed file, not the shared one.
+    stream.push('failed')
+    expect(calls().at(-1)).toEqual(['expression', 'green-cry'])
+    // Leaving the phase restores the same outfit.
+    stream.push('idle')
+    expect(calls().at(-1)).toEqual(['expression', 'outfit-green'])
+    handle.dispose()
+  })
+
+  it('blinks on a head pat and on the idle schedule', async () => {
     const model = fakeModel()
     const ticks: (() => void)[] = []
     const paramCalls: [string, string, number][] = []
-    const ids = ['ParamBreath', 'ParamBodyAngleX', 'ParamEyeLOpen', 'ParamEyeROpen']
+    const ids = ['ParamEyeLOpen', 'ParamEyeROpen']
     Object.assign(model.internalModel, {
       coreModel: {
         getParameterIndex: (id: string) => (ids.includes(id) ? 0 : -1),
@@ -509,10 +568,6 @@ describe('live2dRenderer', () => {
     const handle = live2dRenderer.mount(ctx, live2dRenderer.validateConfig(CONFIG)) as Live2dRendererHandle
     await flush()
     expect(ticks).toHaveLength(1)
-    // The breath cycle rides every frame (the engine's own automator is unfed).
-    ticks[0]!()
-    expect(paramCalls.some(([kind, id]) => kind === 'add' && id === 'ParamBreath')).toBe(true)
-    expect(paramCalls.some(([kind, id]) => kind === 'add' && id === 'ParamBodyAngleX')).toBe(true)
     // A head pat blinks even though this model declares no hit-area motion.
     paramCalls.length = 0
     handle.tap(10, 10)

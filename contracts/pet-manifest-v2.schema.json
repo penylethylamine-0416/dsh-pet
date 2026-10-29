@@ -248,7 +248,20 @@
           },
           "description": "Part ids that hold the eyes when the model has no usable eyelid rig. The renderer hides them for the blink moment (a hard cut, not a fade). Omit it and blinking relies on the standard ParamEyeLOpen/ParamEyeROpen pair, which does nothing for a model whose eyes are painted open."
         },
-        "blinkExpression": {
+        "expressionHold": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Extra milliseconds an emotion expression stays on screen after its phase ended, per phase. The host owns how long a phase itself lasts, so this is how a cry can linger past the failure window.",
+          "properties": {
+            "idle": { "type": "number", "minimum": 0, "maximum": 60000 },
+            "waiting": { "type": "number", "minimum": 0, "maximum": 60000 },
+            "thinking": { "type": "number", "minimum": 0, "maximum": 60000 },
+            "tool": { "type": "number", "minimum": 0, "maximum": 60000 },
+            "review": { "type": "number", "minimum": 0, "maximum": 60000 },
+            "done": { "type": "number", "minimum": 0, "maximum": 60000 },
+            "failed": { "type": "number", "minimum": 0, "maximum": 60000 }
+          }
+        },        "blinkExpression": {
           "type": "string",
           "minLength": 1,
           "maxLength": 64,
@@ -286,6 +299,20 @@
                 "minLength": 1,
                 "maxLength": 64,
                 "description": "Name of an expression in the model3.json Expressions list; an undeclared name is dropped by the registry with a warning."
+              },
+              "expressions": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Per-phase emotion expressions composed WITH this outfit. The expression slot holds one expression at a time, so an outfit that must survive an emotion needs the outfit parameter baked into the emotion file.",
+                "properties": {
+                  "idle": { "type": "string", "minLength": 1 },
+                  "waiting": { "type": "string", "minLength": 1 },
+                  "thinking": { "type": "string", "minLength": 1 },
+                  "tool": { "type": "string", "minLength": 1 },
+                  "review": { "type": "string", "minLength": 1 },
+                  "done": { "type": "string", "minLength": 1 },
+                  "failed": { "type": "string", "minLength": 1 }
+                }
               }
             }
           }
